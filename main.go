@@ -33,7 +33,7 @@ type Config struct {
     Username string `json:"username"`
     Password string `json:"password"`
     DBName   string `json:"dbname"`
-    LogFilePath string `json:"log_file_path"`
+    LogFilePath string `json:"log_directory"`
 }
 
 // สร้างตัวแปรสำหรับ Status Bar และ Content
@@ -93,7 +93,7 @@ func main() {
             }
             contentContainer.Refresh()
         }),
-        widget.NewButton("Log File", func() {
+        widget.NewButton("Log File"+appConfig.LogFilePath, func() {
             contentContainer.Objects = []fyne.CanvasObject{
                 views.LogView(appConfig.LogFilePath),
             }

@@ -15,17 +15,19 @@ import (
 // LogView แสดง Log File ของ PostgreSQL ใน UI ของ HISSYNC v10.0
 func LogView(logDirectory string) fyne.CanvasObject {
     logContent := widget.NewRichText() // เปลี่ยนเป็น RichText เพื่อให้เป็น Read-Only
+	logContent.ParseMarkdown(fmt.Sprintf("logdir=%s",logDirectory))
 
     loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
+		
         logFilePath, err := getLatestLogFile(logDirectory)
         if err != nil {
-            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err))
+            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v logFilePath %s", err, logFilePath))
             return
         }
 
         logText, err := readLogFile(logFilePath)
         if err != nil {
-            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err))
+            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v %s", err, logFilePath))
         } else {
             logContent.ParseMarkdown(fmt.Sprintf("**ไฟล์ล่าสุด:** %s\n\n```\n%s\n```", logFilePath, logText))
         }
