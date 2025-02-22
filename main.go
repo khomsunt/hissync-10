@@ -33,11 +33,13 @@ type Config struct {
     Username string `json:"username"`
     Password string `json:"password"`
     DBName   string `json:"dbname"`
+    LogFilePath string `json:"log_file_path"`
 }
 
 // สร้างตัวแปรสำหรับ Status Bar และ Content
 var statusLabel *widget.RichText
 var contentContainer *fyne.Container
+var appConfig Config
 
 func main() {
     myApp := app.New()
@@ -55,6 +57,8 @@ func main() {
     )
 
     config, err := loadConfig("config.json")
+    appConfig = config
+
     if err != nil || !testConnection(config) {
         log.Println("Failed to connect to the database, showing connection form.")
         updateStatusBar("สถานะ: ไม่เชื่อมต่อฐานข้อมูล", false)
@@ -86,6 +90,12 @@ func main() {
         widget.NewButton("การตั้งค่า", func() {
             contentContainer.Objects = []fyne.CanvasObject{
                 views.SettingsView(),
+            }
+            contentContainer.Refresh()
+        }),
+        widget.NewButton("Log File", func() {
+            contentContainer.Objects = []fyne.CanvasObject{
+                views.LogView(appConfig.LogFilePath),
             }
             contentContainer.Refresh()
         }),
