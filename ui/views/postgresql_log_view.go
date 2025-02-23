@@ -23,30 +23,28 @@ type LogState struct {
 }
 
 type Config struct {
-    DBType      string   `json:"dbtype"`
-    Host        string   `json:"host"`
-    Port        string   `json:"port"`
-    Username    string   `json:"username"`
-    Password    string   `json:"password"`
-    DBName      string   `json:"dbname"`
-    LogFilePath string   `json:"log_file_path"`
-    StateFile   string   `json:"state_file"`
-    FilterTables []string `json:"filter_tables"` // เพิ่มการกรองด้วย Table Name
+    DBType       string   `json:"dbtype"`
+    Host         string   `json:"host"`
+    Port         string   `json:"port"`
+    Username     string   `json:"username"`
+    Password     string   `json:"password"`
+    DBName       string   `json:"dbname"`
+    LogFilePath  string   `json:"log_file_path"`
+    StateFile    string   `json:"state_file"`
+    FilterTables []string `json:"filter_tables"`
 }
 
-// ตัวแปรควบคุม Auto-Refresh
-var autoRefreshEnabled bool
+var autoRefreshEnabled bool = true
 var autoRefreshButton *widget.Button
 var autoRefreshTicker *time.Ticker
 var autoRefreshDone chan bool
 
-// PostgreSQLLogView แสดง Log File ของ PostgreSQL ใน UI ของ HISSYNC v10.0
 func PostgreSQLLogView(configFile string) fyne.CanvasObject {
-    logData := [][]string{} // เก็บข้อมูลวันที่และข้อความ Log แต่ละแถว
+    logData := [][]string{} 
 
     logTable := widget.NewTable(
         func() (int, int) { return len(logData), 2 },
-        func() fyne.CanvasObject { return widget.NewLabel("") },
+        func() fyne.CanvasObject { return widget.NewLabel("\n") },
         func(id widget.TableCellID, cell fyne.CanvasObject) {
             cell.(*widget.Label).SetText(logData[id.Row][id.Col])
         },
@@ -61,11 +59,9 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
     )
 
     tableContainer := container.NewBorder(header, nil, nil, nil, logTable)
-
     scrollContainer := container.NewScroll(tableContainer)
     scrollContainer.SetMinSize(fyne.NewSize(1000, 600))
 
-    // โหลดการตั้งค่าจาก config.json
     config, err := loadConfig(configFile)
     if err != nil {
         logData = [][]string{{"Error", fmt.Sprintf("ไม่สามารถโหลด config.json ได้: %v", err)}}
@@ -73,38 +69,31 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
         return scrollContainer
     }
 
-    log.Printf("Log File Path: %s, State File: %s", config.LogFilePath, config.StateFile)
+    loadLogs := func() {
+        startTime := time.Now().Format("2006-01-02 15:04:05")
+        logState, _ := loadLogState(config.StateFile)
+        logFilePath, err := getLatestPostgresLogFile(config.LogFilePath)
+        if err != nil {
+            logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err)})
+            logTable.Refresh()
+            return
+        }
 
-	// ฟังก์ชันโหลด Log File ล่าสุด โดยกรองเฉพาะคำสั่ง INSERT, UPDATE, DELETE ตาม Table ที่สนใจ
-	loadLogs := func() {
-		startTime := time.Now().Format("2006-01-02 15:04:05")
-		logState, _ := loadLogState(config.StateFile)
-		logFilePath, err := getLatestPostgresLogFile(config.LogFilePath)
-		if err != nil {
-			logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err)})
-			logTable.Refresh()
-			return
-		}
+        parsedLogs, lastDateTime, isNewDataFound, err := readPostgresLogFile(logFilePath, logState.LastLogDateTime, config.FilterTables)
+        if err != nil {
+            logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err)})
+        } else if isNewDataFound {
+            logData = append(logData, [][]string{{startTime, "เริ่มต้นอ่าน Log"}}...)
+            logData = append(logData, parsedLogs...)
+            saveLogState(config.StateFile, lastDateTime, filepath.Base(logFilePath), logData)
+        } else {
+            logData = append(logData, []string{startTime, "ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม"})
+        }
 
-		log.Printf("กำลังโหลด Log File: %s", logFilePath)
+        logTable.Refresh()
+        scrollContainer.ScrollToBottom() 
+    }
 
-		parsedLogs, lastDateTime, isNewDataFound, err := readPostgresLogFile(logFilePath, logState.LastLogDateTime, config.FilterTables)
-		if err != nil {
-			logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err)})
-		} else if isNewDataFound {
-			logData = append(logData, [][]string{{startTime, "เริ่มต้นอ่าน Log"}}...)
-			logData = append(logData, parsedLogs...)
-			saveLogState(config.StateFile, lastDateTime, filepath.Base(logFilePath), logData)
-			log.Printf("บันทึกค่า State ใหม่: %s, %s\n", lastDateTime, filepath.Base(logFilePath))
-		} else {
-			logData = append(logData, []string{startTime, "ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม"})
-			log.Printf("ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม")
-		}
-
-		logTable.Refresh()
-		scrollContainer.ScrollToBottom() // เลื่อน Scroll อัตโนมัติ
-	}
-	
     loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
         loadLogs()
     })
@@ -114,7 +103,6 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
         logTable.Refresh()
     })
 
-    // สร้างปุ่ม Auto-Refresh และกำหนดการทำงาน
     autoRefreshButton = widget.NewButton("เปิดการรีเฟรชอัตโนมัติ", func() {
         autoRefreshEnabled = !autoRefreshEnabled
         if autoRefreshEnabled {
