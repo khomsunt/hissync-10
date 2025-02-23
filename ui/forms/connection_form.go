@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -22,12 +23,15 @@ import (
 )
 
 type Config struct {
-    DBType   string `json:"dbtype"`
-    Host     string `json:"host"`
-    Port     string `json:"port"`
-    Username string `json:"username"`
-    Password string `json:"password"`
-    DBName   string `json:"dbname"`
+    DBType      string   `json:"dbtype"`
+    Host        string   `json:"host"`
+    Port        string   `json:"port"`
+    Username    string   `json:"username"`
+    Password    string   `json:"password"`
+    DBName      string   `json:"dbname"`
+    LogFilePath string   `json:"log_file_path"`
+    StateFile   string   `json:"state_file"`
+    FilterTables []string `json:"filter_tables"`
 }
 
 // ShowConnectionForm แสดง Popup Form สำหรับกำหนดค่าการเชื่อมต่อกับฐานข้อมูล
@@ -40,8 +44,10 @@ func ShowConnectionForm(myWindow fyne.Window) {
     userEntry := widget.NewEntry()
     passwordEntry := widget.NewPasswordEntry()
     dbNameEntry := widget.NewEntry()
+    logFilePathEntry := widget.NewEntry()
+    stateFileEntry := widget.NewEntry()
+    filterTablesEntry := widget.NewEntry()
 
-    // โหลดค่าจาก config.json ถ้ามีอยู่
     config, err := loadConfig("config.json")
     if err == nil {
         dbTypeSelect.SetSelected(config.DBType)
@@ -50,6 +56,9 @@ func ShowConnectionForm(myWindow fyne.Window) {
         userEntry.SetText(config.Username)
         passwordEntry.SetText(config.Password)
         dbNameEntry.SetText(config.DBName)
+        logFilePathEntry.SetText(config.LogFilePath)
+        stateFileEntry.SetText(config.StateFile)
+        filterTablesEntry.SetText(strings.Join(config.FilterTables, ","))
     } else {
         log.Println("No existing config file found, starting with empty form.")
     }
@@ -61,29 +70,34 @@ func ShowConnectionForm(myWindow fyne.Window) {
         widget.NewFormItem("Username", userEntry),
         widget.NewFormItem("Password", passwordEntry),
         widget.NewFormItem("Database Name", dbNameEntry),
+        widget.NewFormItem("Log File Path", logFilePathEntry),
+        widget.NewFormItem("State File", stateFileEntry),
+        widget.NewFormItem("Filter Tables (comma-separated)", filterTablesEntry),
     )
 
     var popup dialog.Dialog
 
     saveButton := widget.NewButton("Save", func() {
         config := Config{
-            DBType:   dbTypeSelect.Selected,
-            Host:     hostEntry.Text,
-            Port:     portEntry.Text,
-            Username: userEntry.Text,
-            Password: passwordEntry.Text,
-            DBName:   dbNameEntry.Text,
+            DBType:      dbTypeSelect.Selected,
+            Host:        hostEntry.Text,
+            Port:        portEntry.Text,
+            Username:    userEntry.Text,
+            Password:    passwordEntry.Text,
+            DBName:      dbNameEntry.Text,
+            LogFilePath: logFilePathEntry.Text,
+            StateFile:   stateFileEntry.Text,
+            FilterTables: strings.Split(filterTablesEntry.Text, ","),
+        }
+
+        for i := range config.FilterTables {
+            config.FilterTables[i] = strings.TrimSpace(config.FilterTables[i])
         }
 
         if testConnection(config) {
             saveConfig(config)
             dialog.ShowInformation("Success", "Connection Successful and Config Saved!", myWindow)
-
-            // แสดง Popup แจ้งเตือนก่อน Restart แอพ
             showRestartConfirmation(myWindow, popup)
-
-            //popup.Hide() // ปิด Popup เมื่อเชื่อมต่อสำเร็จ
-            //restartApp()  // Restart แอพพลิเคชัน
         } else {
             dialog.ShowError(fmt.Errorf("Failed to connect to the database"), myWindow)
         }
@@ -91,7 +105,7 @@ func ShowConnectionForm(myWindow fyne.Window) {
 
     cancelButton := widget.NewButton("Cancel", func() {
         if popup != nil {
-            popup.Hide() // ปิด Popup โดยไม่ปิดแอพพลิเคชัน
+            popup.Hide()
         }
     })
 
@@ -99,38 +113,8 @@ func ShowConnectionForm(myWindow fyne.Window) {
     formContainer := container.NewVBox(form, buttonContainer)
 
     popup = dialog.NewCustom("Database Connection", "Close", formContainer, myWindow)
-    popup.Resize(fyne.NewSize(600, 400))
+    popup.Resize(fyne.NewSize(600, 500))
     popup.Show()
-}
-
-
-// showRestartConfirmation แสดง Popup แจ้งเตือนก่อน Restart แอพ
-func showRestartConfirmation(myWindow fyne.Window, popup dialog.Dialog) {
-    dialog.ShowConfirm(
-        "Restart Required",
-        "เนื่องจากมีการเปลี่ยนแปลงค่ากำหนดเชื่อมต่อข้อมูล ระบบจำเป็นต้อง Restart เพื่อทำการเชื่อมต่อฐานข้อมูลใหม่อย่างสมบูรณ์",
-        func(confirm bool) {
-            if confirm {
-                popup.Hide() // ปิด Popup การตั้งค่า
-                restartApp() // ทำการ Restart แอพพลิเคชัน
-            }
-        },
-        myWindow,
-    )
-}
-
-// loadConfig โหลดการตั้งค่าจากไฟล์ config.json
-func loadConfig(filepath string) (Config, error) {
-    var config Config
-    file, err := os.Open(filepath)
-    if err != nil {
-        return config, err
-    }
-    defer file.Close()
-
-    decoder := json.NewDecoder(file)
-    err = decoder.Decode(&config)
-    return config, err
 }
 
 // testConnection ทดสอบการเชื่อมต่อกับฐานข้อมูล
@@ -180,6 +164,36 @@ func testConnection(config Config) bool {
         log.Println("Unsupported database type:", config.DBType)
         return false
     }
+}
+
+
+// showRestartConfirmation แสดง Popup แจ้งเตือนก่อน Restart แอพ
+func showRestartConfirmation(myWindow fyne.Window, popup dialog.Dialog) {
+    dialog.ShowConfirm(
+        "Restart Required",
+        "เนื่องจากมีการเปลี่ยนแปลงค่ากำหนดเชื่อมต่อข้อมูล ระบบจำเป็นต้อง Restart เพื่อทำการเชื่อมต่อฐานข้อมูลใหม่อย่างสมบูรณ์",
+        func(confirm bool) {
+            if confirm {
+                popup.Hide() // ปิด Popup การตั้งค่า
+                restartApp() // ทำการ Restart แอพพลิเคชัน
+            }
+        },
+        myWindow,
+    )
+}
+
+// loadConfig โหลดการตั้งค่าจากไฟล์ config.json
+func loadConfig(filepath string) (Config, error) {
+    var config Config
+    file, err := os.Open(filepath)
+    if err != nil {
+        return config, err
+    }
+    defer file.Close()
+
+    decoder := json.NewDecoder(file)
+    err = decoder.Decode(&config)
+    return config, err
 }
 
 // saveConfig บันทึกค่าการเชื่อมต่อฐานข้อมูลลงในไฟล์ config.json

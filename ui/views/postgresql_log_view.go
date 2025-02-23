@@ -22,8 +22,26 @@ type LogState struct {
     CachedLogs      [][]string `json:"cached_logs"`
 }
 
+type Config struct {
+    DBType      string   `json:"dbtype"`
+    Host        string   `json:"host"`
+    Port        string   `json:"port"`
+    Username    string   `json:"username"`
+    Password    string   `json:"password"`
+    DBName      string   `json:"dbname"`
+    LogFilePath string   `json:"log_file_path"`
+    StateFile   string   `json:"state_file"`
+    FilterTables []string `json:"filter_tables"` // เพิ่มการกรองด้วย Table Name
+}
+
+// ตัวแปรควบคุม Auto-Refresh
+var autoRefreshEnabled bool
+var autoRefreshButton *widget.Button
+var autoRefreshTicker *time.Ticker
+var autoRefreshDone chan bool
+
 // PostgreSQLLogView แสดง Log File ของ PostgreSQL ใน UI ของ HISSYNC v10.0
-func PostgreSQLLogView(logDirectory string, stateFile string) fyne.CanvasObject {
+func PostgreSQLLogView(configFile string) fyne.CanvasObject {
     logData := [][]string{} // เก็บข้อมูลวันที่และข้อความ Log แต่ละแถว
 
     logTable := widget.NewTable(
@@ -37,36 +55,6 @@ func PostgreSQLLogView(logDirectory string, stateFile string) fyne.CanvasObject 
     logTable.SetColumnWidth(0, 200)
     logTable.SetColumnWidth(1, 800)
 
-    loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
-        logState, _ := loadLogState(stateFile)
-        logFilePath, err := getLatestPostgresLogFile(logDirectory)
-        if err != nil {
-            logData = [][]string{{"Error", fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err)}}
-            logTable.Refresh()
-            return
-        }
-
-        log.Printf("กำลังโหลด Log File: %s", logFilePath)
-
-        parsedLogs, lastDateTime, isNewDataFound, err := readPostgresLogFile(logFilePath, logState.LastLogDateTime)
-        if err != nil {
-            logData = [][]string{{"Error", fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err)}}
-        } else if isNewDataFound {
-            logData = parsedLogs
-            saveLogState(stateFile, lastDateTime, filepath.Base(logFilePath), logData)
-            log.Printf("บันทึกค่า State ใหม่: %s, %s\n", lastDateTime, filepath.Base(logFilePath))
-        } else {
-            logData = logState.CachedLogs
-            log.Printf("ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม")
-        }
-
-        if len(logData) == 0 {
-            logData = [][]string{{"Info", "ไม่มีข้อมูล Log ให้แสดง"}}
-        }
-
-        logTable.Refresh()
-    })
-
     header := container.NewHBox(
         widget.NewLabelWithStyle("วันที่และเวลา", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
         widget.NewLabelWithStyle("ข้อความ Log", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -77,11 +65,106 @@ func PostgreSQLLogView(logDirectory string, stateFile string) fyne.CanvasObject 
     scrollContainer := container.NewScroll(tableContainer)
     scrollContainer.SetMinSize(fyne.NewSize(1000, 600))
 
-    return container.NewBorder(loadButton, nil, nil, nil, scrollContainer)
+    // โหลดการตั้งค่าจาก config.json
+    config, err := loadConfig(configFile)
+    if err != nil {
+        logData = [][]string{{"Error", fmt.Sprintf("ไม่สามารถโหลด config.json ได้: %v", err)}}
+        logTable.Refresh()
+        return scrollContainer
+    }
+
+    log.Printf("Log File Path: %s, State File: %s", config.LogFilePath, config.StateFile)
+
+	// ฟังก์ชันโหลด Log File ล่าสุด โดยกรองเฉพาะคำสั่ง INSERT, UPDATE, DELETE ตาม Table ที่สนใจ
+	loadLogs := func() {
+		startTime := time.Now().Format("2006-01-02 15:04:05")
+		logState, _ := loadLogState(config.StateFile)
+		logFilePath, err := getLatestPostgresLogFile(config.LogFilePath)
+		if err != nil {
+			logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err)})
+			logTable.Refresh()
+			return
+		}
+
+		log.Printf("กำลังโหลด Log File: %s", logFilePath)
+
+		parsedLogs, lastDateTime, isNewDataFound, err := readPostgresLogFile(logFilePath, logState.LastLogDateTime, config.FilterTables)
+		if err != nil {
+			logData = append(logData, []string{"Error", fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err)})
+		} else if isNewDataFound {
+			logData = append(logData, [][]string{{startTime, "เริ่มต้นอ่าน Log"}}...)
+			logData = append(logData, parsedLogs...)
+			saveLogState(config.StateFile, lastDateTime, filepath.Base(logFilePath), logData)
+			log.Printf("บันทึกค่า State ใหม่: %s, %s\n", lastDateTime, filepath.Base(logFilePath))
+		} else {
+			logData = append(logData, []string{startTime, "ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม"})
+			log.Printf("ไม่มี Log ใหม่ ใช้ข้อมูลจาก state.json เดิม")
+		}
+
+		logTable.Refresh()
+		scrollContainer.ScrollToBottom() // เลื่อน Scroll อัตโนมัติ
+	}
+	
+    loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
+        loadLogs()
+    })
+
+    clearButton := widget.NewButton("เคลียร์ข้อมูล", func() {
+        logData = [][]string{}
+        logTable.Refresh()
+    })
+
+    // สร้างปุ่ม Auto-Refresh และกำหนดการทำงาน
+    autoRefreshButton = widget.NewButton("เปิดการรีเฟรชอัตโนมัติ", func() {
+        autoRefreshEnabled = !autoRefreshEnabled
+        if autoRefreshEnabled {
+            autoRefreshButton.SetText("ปิดการรีเฟรชอัตโนมัติ")
+            autoRefreshTicker = time.NewTicker(10 * time.Second)
+            autoRefreshDone = make(chan bool)
+
+            go func() {
+                for {
+                    select {
+                    case <-autoRefreshDone:
+                        return
+                    case <-autoRefreshTicker.C:
+                        loadLogs()
+                    }
+                }
+            }()
+        } else {
+            autoRefreshButton.SetText("เปิดการรีเฟรชอัตโนมัติ")
+            if autoRefreshTicker != nil {
+                autoRefreshTicker.Stop()
+            }
+            if autoRefreshDone != nil {
+                autoRefreshDone <- true
+            }
+        }
+    })
+
+    controlContainer := container.NewHBox(loadButton, clearButton, autoRefreshButton)
+
+    return container.NewBorder(controlContainer, nil, nil, nil, scrollContainer)
 }
 
-// readPostgresLogFile อ่าน Log File พร้อมคืนค่าข้อมูล Log และสถานะว่ามี Log ใหม่หรือไม่
-func readPostgresLogFile(filePath, lastDateTime string) ([][]string, string, bool, error) {
+
+// loadConfig โหลดการตั้งค่าจากไฟล์ config.json
+func loadConfig(filepath string) (Config, error) {
+    var config Config
+    file, err := os.Open(filepath)
+    if err != nil {
+        return config, err
+    }
+    defer file.Close()
+
+    decoder := json.NewDecoder(file)
+    err = decoder.Decode(&config)
+    return config, err
+}
+
+// readPostgresLogFile อ่าน Log File โดยกรองเฉพาะคำสั่ง INSERT, UPDATE, DELETE ใน Table ที่สนใจ
+func readPostgresLogFile(filePath, lastDateTime string, filterTables []string) ([][]string, string, bool, error) {
     file, err := os.Open(filePath)
     if err != nil {
         return nil, "", false, err
@@ -103,9 +186,22 @@ func readPostgresLogFile(filePath, lastDateTime string) ([][]string, string, boo
 
             if parsedTime, err := time.Parse(dateTimeFormat, logTime); err == nil {
                 if lastDateTime == "" || parsedTime.After(parseDateTime(lastDateTime)) {
-                    logs = append(logs, []string{logTime, logMessage})
-                    lastReadTime = logTime
-                    isNewDataFound = true
+                    
+                    // กรองเฉพาะคำสั่ง INSERT, UPDATE, DELETE สำหรับ Table ที่สนใจ
+                    for _, tableName := range filterTables {
+                        if strings.Contains(logMessage, fmt.Sprintf(`INSERT INTO "public"."%s"`, tableName)) ||
+                            strings.Contains(logMessage, fmt.Sprintf(`UPDATE "public"."%s"`, tableName)) ||
+                            strings.Contains(logMessage, fmt.Sprintf(`DELETE FROM "public"."%s"`, tableName)) ||
+                            strings.Contains(logMessage, fmt.Sprintf(`INSERT INTO "%s"`, tableName)) ||
+                            strings.Contains(logMessage, fmt.Sprintf(`UPDATE "%s"`, tableName)) ||
+                            strings.Contains(logMessage, fmt.Sprintf(`DELETE FROM "%s"`, tableName)) {
+                                
+                            logs = append(logs, []string{logTime, logMessage})
+                            lastReadTime = logTime
+                            isNewDataFound = true
+                            break
+                        }
+                    }
                 }
             } else {
                 log.Printf("ไม่สามารถแปลงเวลา: %s, ข้อความ: %s\n", logTime, line)
@@ -119,6 +215,9 @@ func readPostgresLogFile(filePath, lastDateTime string) ([][]string, string, boo
 
     return logs, lastReadTime, isNewDataFound, nil
 }
+
+
+
 
 
 // loadLogState โหลดสถานะการอ่าน Log จากไฟล์ state.json

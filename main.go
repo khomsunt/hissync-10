@@ -33,7 +33,7 @@ type Config struct {
     Username string `json:"username"`
     Password string `json:"password"`
     DBName   string `json:"dbname"`
-    LogFilePath string `json:"log_directory"`
+    LogFilePath string `json:"log_file_path"`
     StateFile    string `json:"state_file"`
 }
 
@@ -96,7 +96,7 @@ func main() {
         }),
         widget.NewButton("Log File"+appConfig.LogFilePath, func() {
             contentContainer.Objects = []fyne.CanvasObject{
-                views.PostgreSQLLogView(appConfig.LogFilePath, appConfig.StateFile),
+                views.PostgreSQLLogView("config.json"),
             }
             contentContainer.Refresh()
         }),
