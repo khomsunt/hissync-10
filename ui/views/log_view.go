@@ -13,27 +13,29 @@ import (
 )
 
 // LogView แสดง Log File ของ PostgreSQL ใน UI ของ HISSYNC v10.0
-func LogView(logDirectory string) fyne.CanvasObject {
-    logContent := widget.NewRichText() // เปลี่ยนเป็น RichText เพื่อให้เป็น Read-Only
-	logContent.ParseMarkdown(fmt.Sprintf("logdir=%s",logDirectory))
+func PostgreSQLLogView(logDirectory string) fyne.CanvasObject {
+    logContent := widget.NewRichText() // ใช้ RichText เพื่อแสดงข้อมูลแบบ Read-Only
+
+    scrollContainer := container.NewScroll(logContent) // เพิ่ม Scroll ให้ LogContent
+    scrollContainer.SetMinSize(fyne.NewSize(800, 600)) // กำหนดขนาดขั้นต่ำ
 
     loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
-		
         logFilePath, err := getLatestLogFile(logDirectory)
         if err != nil {
-            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v logFilePath %s", err, logFilePath))
+            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถค้นหา Log File ล่าสุดได้: %v", err))
             return
         }
 
         logText, err := readLogFile(logFilePath)
         if err != nil {
-            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v %s", err, logFilePath))
+            logContent.ParseMarkdown(fmt.Sprintf("ไม่สามารถโหลด Log File ได้: %v", err))
         } else {
             logContent.ParseMarkdown(fmt.Sprintf("**ไฟล์ล่าสุด:** %s\n\n```\n%s\n```", logFilePath, logText))
+            scrollContainer.ScrollToTop() // เลื่อนขึ้นด้านบนเมื่อโหลด Log ใหม่
         }
     })
 
-    return container.NewBorder(loadButton, nil, nil, nil, logContent)
+    return container.NewBorder(loadButton, nil, nil, nil, scrollContainer)
 }
 
 // getLatestLogFile ค้นหาไฟล์ Log ล่าสุดใน Directory

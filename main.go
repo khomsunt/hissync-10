@@ -95,7 +95,7 @@ func main() {
         }),
         widget.NewButton("Log File"+appConfig.LogFilePath, func() {
             contentContainer.Objects = []fyne.CanvasObject{
-                views.LogView(appConfig.LogFilePath),
+                views.PostgreSQLLogView(appConfig.LogFilePath),
             }
             contentContainer.Refresh()
         }),
