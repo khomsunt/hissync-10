@@ -34,6 +34,7 @@ type Config struct {
     Password string `json:"password"`
     DBName   string `json:"dbname"`
     LogFilePath string `json:"log_directory"`
+    StateFile    string `json:"state_file"`
 }
 
 // สร้างตัวแปรสำหรับ Status Bar และ Content
@@ -95,7 +96,7 @@ func main() {
         }),
         widget.NewButton("Log File"+appConfig.LogFilePath, func() {
             contentContainer.Objects = []fyne.CanvasObject{
-                views.PostgreSQLLogView(appConfig.LogFilePath),
+                views.PostgreSQLLogView(appConfig.LogFilePath, appConfig.StateFile),
             }
             contentContainer.Refresh()
         }),
