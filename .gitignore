@@ -1,3 +1,4 @@
 #Ignore specific files
 config.json
 hissync-10
+state.json

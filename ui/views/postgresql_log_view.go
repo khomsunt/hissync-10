@@ -41,12 +41,14 @@ var autoRefreshDone chan bool
 
 func PostgreSQLLogView(configFile string) fyne.CanvasObject {
     logData := [][]string{} 
-
+        
     logTable := widget.NewTable(
         func() (int, int) { return len(logData), 2 },
         func() fyne.CanvasObject { return widget.NewLabel("\n") },
         func(id widget.TableCellID, cell fyne.CanvasObject) {
-            cell.(*widget.Label).SetText(logData[id.Row][id.Col])
+            label := cell.(*widget.Label)
+            label.SetText(logData[id.Row][id.Col])
+            label.Wrapping = fyne.TextWrapWord
         },
     )
 
@@ -68,6 +70,10 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
         logTable.Refresh()
         return scrollContainer
     }
+
+    // เพิ่มตัวแปรสำหรับติดตามเวลาล่าสุดที่เคลียร์
+    var lastClearTime time.Time = time.Now()
+    const refreshInterval = 10 * time.Minute
 
     loadLogs := func() {
         startTime := time.Now().Format("2006-01-02 15:04:05")
@@ -94,6 +100,34 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
         scrollContainer.ScrollToBottom() 
     }
 
+    // เริ่มต้นการรีเฟรชอัตโนมัติทุก 10 วินาทีสำหรับการอัพเดทปกติ
+    autoRefreshEnabled = true
+    autoRefreshTicker = time.NewTicker(10 * time.Second)
+    autoRefreshDone = make(chan bool)
+
+    // เพิ่ม ticker สำหรับตรวจสอบการรีเฟรชทุก 10 นาที
+    refreshCheckTicker := time.NewTicker(1 * time.Minute)
+    refreshDone := make(chan bool)
+
+    go func() {
+        for {
+            select {
+            case <-autoRefreshDone:
+                refreshCheckTicker.Stop()
+                refreshDone <- true
+                return
+            case <-autoRefreshTicker.C:
+                if autoRefreshEnabled {
+                    loadLogs()
+                }
+            case <-refreshCheckTicker.C:
+                if autoRefreshEnabled && time.Since(lastClearTime) >= refreshInterval {
+                    loadLogs()
+                }
+            }
+        }
+    }()
+
     loadButton := widget.NewButton("โหลด Log File ล่าสุด", func() {
         loadLogs()
     })
@@ -101,22 +135,31 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
     clearButton := widget.NewButton("เคลียร์ข้อมูล", func() {
         logData = [][]string{}
         logTable.Refresh()
+        lastClearTime = time.Now() // รีเซ็ตเวลาการเคลียร์ล่าสุด
     })
 
-    autoRefreshButton = widget.NewButton("เปิดการรีเฟรชอัตโนมัติ", func() {
+    autoRefreshButton = widget.NewButton("ปิดการรีเฟรชอัตโนมัติ", func() {
         autoRefreshEnabled = !autoRefreshEnabled
         if autoRefreshEnabled {
             autoRefreshButton.SetText("ปิดการรีเฟรชอัตโนมัติ")
             autoRefreshTicker = time.NewTicker(10 * time.Second)
             autoRefreshDone = make(chan bool)
+            refreshCheckTicker = time.NewTicker(1 * time.Minute)
+            refreshDone = make(chan bool)
 
             go func() {
                 for {
                     select {
                     case <-autoRefreshDone:
+                        refreshCheckTicker.Stop()
+                        refreshDone <- true
                         return
                     case <-autoRefreshTicker.C:
                         loadLogs()
+                    case <-refreshCheckTicker.C:
+                        if time.Since(lastClearTime) >= refreshInterval {
+                            loadLogs()
+                        }
                     }
                 }
             }()
@@ -125,8 +168,14 @@ func PostgreSQLLogView(configFile string) fyne.CanvasObject {
             if autoRefreshTicker != nil {
                 autoRefreshTicker.Stop()
             }
+            if refreshCheckTicker != nil {
+                refreshCheckTicker.Stop()
+            }
             if autoRefreshDone != nil {
                 autoRefreshDone <- true
+            }
+            if refreshDone != nil {
+                refreshDone <- true
             }
         }
     })
