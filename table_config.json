@@ -1,0 +1,21 @@
+[
+    {
+        "table_name": "user",
+        "keys": [
+            "user_name",
+            "user_first_name"
+        ],
+        "primary_key": [
+            "user_id"
+        ]
+    },
+    {
+        "table_name": "office",
+        "keys": [
+            "office_id"
+        ],
+        "primary_key": [
+            "office_id"
+        ]
+    }
+]
