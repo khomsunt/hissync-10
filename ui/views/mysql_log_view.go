@@ -35,12 +35,13 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 			appendLog(fmt.Sprintf("❌ ไม่สามารถเชื่อมต่อ MySQL: %v", err))
 			return
 		}
-		//defer db.Close()
+		defer db.Close()
 
 		// ดึง Binlog ล่าสุด
 		var binlogFile string
 		var binlogPos uint32
-		err = db.QueryRow("SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos)
+		var binlogIgnored1, binlogIgnored2, binlogIgnored3 string // ค่าที่ไม่จำเป็นต้องใช้
+		err = db.QueryRow("SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &binlogIgnored1, &binlogIgnored2, &binlogIgnored3)
 		if err != nil {
 			appendLog(fmt.Sprintf("❌ ไม่สามารถดึง Binlog ล่าสุด: %v", err))
 			return
