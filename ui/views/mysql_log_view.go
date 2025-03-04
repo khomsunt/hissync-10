@@ -5,138 +5,322 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"io/ioutil"
+	"log"
+	"os"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	_ "github.com/go-sql-driver/mysql"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
+
+	config "hissync-10/functions"
 )
 
-func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
-	// UI ส่วนแสดง Log
-	logText := widget.NewMultiLineEntry()
-	logText.SetText("กำลังเชื่อมต่อ MySQL...\n")
-	logText.Wrapping = fyne.TextWrapWord
-	logText.Disable()
+type State struct {
+	LastBinlogPosition string `json:"last_binlog_position"`
+	LastLogDatetime    string `json:"last_log_datetime"`
+	LastLogFile        string `json:"last_log_file"`
+}
 
-	// แสดง Log บน UI
-	appendLog := func(text string) {
-		logText.SetText(logText.Text + text + "\n")
+func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
+	// โหลด config.json
+	cfg, err := config.LoadConfig(configFile)
+	if err != nil {
+		log.Fatalf("❌ ไม่สามารถโหลด config.json: %v", err)
 	}
 
-	// ใช้ Goroutine เพื่ออ่าน Binlog
+	// ตาราง Log
+	data := [][]string{
+		{"Binlog Pos.", "Timestamp", "Table", "Query Type", "Primary Key", "SQL"},
+	}
+
+	table := widget.NewTable(
+		func() (int, int) { return len(data), 6 },
+		func() fyne.CanvasObject {
+			label := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{})
+			label.Wrapping = fyne.TextWrapWord
+			return container.NewStack(
+				canvas.NewRectangle(color.Transparent),
+				label,
+			)
+		},
+		func(id widget.TableCellID, obj fyne.CanvasObject) {
+			var label *widget.Label
+			var bg *canvas.Rectangle
+			switch o := obj.(type) {
+			case *fyne.Container:
+				cont := o
+				label = cont.Objects[1].(*widget.Label)
+				bg = cont.Objects[0].(*canvas.Rectangle)
+			case *widget.Label:
+				label = o
+			default:
+				panic("unexpected object type in table cell")
+			}
+
+			label.SetText(data[id.Row][id.Col])
+			if id.Row == 0 {
+				label.TextStyle = fyne.TextStyle{Bold: true}
+				if bg != nil {
+					bg.FillColor = color.Gray{0xE0}
+					bg.Refresh()
+				}
+			} else {
+				label.TextStyle = fyne.TextStyle{}
+				if bg != nil {
+					bg.FillColor = color.Transparent
+					bg.Refresh()
+				}
+			}
+			label.Refresh()
+		},
+	)
+
+	table.SetColumnWidth(0, 100)
+	table.SetColumnWidth(1, 180)
+	table.SetColumnWidth(2, 250)
+	table.SetColumnWidth(3, 100)
+	table.SetColumnWidth(4, 300)
+	table.SetColumnWidth(5, 500)
+
+	calculateRowHeight := func(row int) float32 {
+		maxHeight := float32(24)
+		for col := 0; col < 6; col++ {
+			lines := len(data[row][col]) / 50
+			height := float32((lines + 1) * 24)
+			if height > maxHeight {
+				maxHeight = height
+			}
+		}
+		return maxHeight
+	}
+
+	updateTable := func(binlogPosStr, timestamp, tableName, queryType, primaryKey, sql string) {
+		data = append(data, []string{binlogPosStr, timestamp, tableName, queryType, primaryKey, sql})
+		table.Length = func() (int, int) {
+			return len(data), 6
+		}
+		table.Refresh()
+		for i := range data {
+			table.SetRowHeight(i, calculateRowHeight(i))
+		}
+	}
+
+	// อ่านและบันทึก state.json
+	saveState := func(pos string, datetime string, file string) {
+		state := State{
+			LastBinlogPosition: pos,
+			LastLogDatetime:    datetime,
+			LastLogFile:        file,
+		}
+		jsonData, _ := json.MarshalIndent(state, "", "  ")
+		ioutil.WriteFile("state.json", jsonData, 0644)
+	}
+
+	loadState := func() (string, string, error) {
+		file, err := ioutil.ReadFile(cfg.StateFile)
+
+		log.Println("cfg.StateFile=%s",cfg.StateFile)
+
+
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Println("IsNotExist")
+				return "0", "", nil // ถ้าไม่มีไฟล์ ให้คืนค่าเริ่มต้น
+			}
+			log.Println("err != nil")
+			return "0", "", err // ถ้ามีข้อผิดพลาดอื่นๆ
+		}
+		var state State
+		if err := json.Unmarshal(file, &state); err != nil {
+			return "0", "", err // ถ้า unmarshal ไม่ได้
+		}
+		// ถ้า LastLogFile เป็นค่าว่างหรือข้อมูลไม่สมบูรณ์ ให้คืนค่าเริ่มต้น
+		if state.LastLogFile == "" {
+			return "0", "", nil
+		}
+		return state.LastBinlogPosition, state.LastLogFile, nil
+	}
+
 	go func() {
-		// ตั้งค่าการเชื่อมต่อ MySQL
-		mysqlDSN := `root:5HAg3rWT#m@tcp(209.15.97.58:3306)/`
+		mysqlDSN := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
+			cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.DBName)
+
 		db, err := sql.Open("mysql", mysqlDSN)
 		if err != nil {
-			appendLog(fmt.Sprintf("❌ ไม่สามารถเชื่อมต่อ MySQL: %v", err))
+			updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถเชื่อมต่อ MySQL: %v", err))
 			return
 		}
 		defer db.Close()
 
-		// ดึง Binlog ล่าสุด
-		var binlogFile string
-		var binlogPos uint32
-		var binlogIgnored1, binlogIgnored2, binlogIgnored3 string
-		err = db.QueryRow("SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &binlogIgnored1, &binlogIgnored2, &binlogIgnored3)
-		if err != nil {
-			appendLog(fmt.Sprintf("❌ ไม่สามารถดึง Binlog ล่าสุด: %v", err))
-			return
-		}
-
-		appendLog(fmt.Sprintf("✅ Binlog ล่าสุด: %s, Position: %d", binlogFile, binlogPos))
-
-		// ตั้งค่าการอ่าน Binlog
-		cfg := replication.BinlogSyncerConfig{
+		syncerCfg := replication.BinlogSyncerConfig{
 			ServerID: 100,
 			Flavor:   "mysql",
-			Host:     "209.15.97.58",
+			Host:     cfg.Host,
 			Port:     3306,
-			User:     "root",
-			Password: "5HAg3rWT#m",
+			User:     cfg.Username,
+			Password: cfg.Password,
 		}
-
-		// สร้าง Binlog Syncer
-		syncer := replication.NewBinlogSyncer(cfg)
-
-		// เริ่มอ่าน Binlog จากไฟล์ล่าสุด
-		streamer, err := syncer.StartSync(mysql.Position{Name: binlogFile, Pos: binlogPos})
-		if err != nil {
-			appendLog(fmt.Sprintf("❌ เริ่มต้น Sync Binlog ไม่สำเร็จ: %v", err))
-			return
-		}
-
-		appendLog("🔄 กำลังอ่าน MySQL Binlog ...")
-
-		// ✅ Map สำหรับเก็บโครงสร้างของตาราง
-		tableMap := make(map[uint64]*replication.TableMapEvent)
 
 		for {
-			ev, err := streamer.GetEvent(context.Background())
+			// อ่าน state.json
+			lastPosStr, lastFile, err := loadState()
+			log.Println("lastPosStr=%s lastFile=%s",lastPosStr,lastFile)
+
+
+			var binlogPos uint32
+			var binlogFile string
+			binlogPosStr := lastPosStr // กำหนดค่าเริ่มต้นให้ binlogPosStr
+
+			// ถ้าไม่มี lastFile หรือ lastPosStr เป็น "0" (กรณีเริ่มต้นหรือข้อมูลว่าง) ใช้ binlog ล่าสุด
+			if lastFile == "" || lastPosStr == "0" {
+				log.Println("lastFile=''")
+				var binlogIgnored1, binlogIgnored2, binlogIgnored3 string
+				err = db.QueryRow("SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &binlogIgnored1, &binlogIgnored2, &binlogIgnored3)
+				if err != nil {
+					updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถดึง Binlog ล่าสุด: %v", err))
+					return
+				}
+				binlogPosStr = fmt.Sprintf("%d", binlogPos) // อัปเดต binlogPosStr
+				lastFile = binlogFile                       // อัปเดต lastFile
+			} else {
+				binlogFile = lastFile
+				binlogPos = uint32(atoi(lastPosStr)) // แปลง string เป็น uint32
+			}
+
+
+
 			if err != nil {
-				appendLog(fmt.Sprintf("❌ เกิดข้อผิดพลาดในการอ่าน Binlog: %v", err))
+				
+//				updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถโหลด state.json: %v", err))
+//				return
+			}
+
+
+			syncer := replication.NewBinlogSyncer(syncerCfg)
+			streamer, err := syncer.StartSync(mysql.Position{Name: binlogFile, Pos: binlogPos})
+			if err != nil {
+				updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ เริ่มต้น Sync Binlog ไม่สำเร็จ: %v", err))
 				return
 			}
 
-			switch e := ev.Event.(type) {
-			case *replication.TableMapEvent:
-				// บันทึก TableMapEvent
-				tableMap[e.TableID] = e
+			tableMap := make(map[uint64]*replication.TableMapEvent)
+			timeout := time.After(10 * time.Second) // อ่านนานสุด 10 วินาที
 
-			case *replication.RowsEvent:
-				// ตรวจสอบว่า TableMap มีข้อมูลหรือไม่
-				table, ok := tableMap[e.TableID]
-				if !ok {
-					appendLog("⚠️ ไม่พบข้อมูล TableMapEvent")
-					continue
-				}
-
-				// ดึงชื่อ Database และ Table
-				dbName := string(table.Schema)
-				tableName := string(table.Table)
-				fullTableName := fmt.Sprintf("`%s`.`%s`", dbName, tableName)
-
-				// สร้าง SQL Statement ตามประเภทของ Event
-				switch ev.Header.EventType {
-				case replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
-					for _, row := range e.Rows {
-						sql, primaryKeyJSON := buildInsertSQL(db, dbName, tableName, row)
-						appendLog(fmt.Sprintf("📌 Table: %s", fullTableName))
-						appendLog(sql)
-						appendLog(fmt.Sprintf("🔑 Primary Key: %s", primaryKeyJSON))
-					}
-				case replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
-					for i := 0; i < len(e.Rows); i += 2 {
-						oldRow, newRow := e.Rows[i], e.Rows[i+1]
-						sql, primaryKeyJSON := buildUpdateSQL(db, dbName, tableName, oldRow, newRow)
-						appendLog(fmt.Sprintf("📌 Table: %s", fullTableName))
-						appendLog(sql)
-						appendLog(fmt.Sprintf("🔑 Primary Key: %s", primaryKeyJSON))
-					}
-				case replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
-					for _, row := range e.Rows {
-						sql, primaryKeyJSON := buildDeleteSQL(db, dbName, tableName, row)
-						appendLog(fmt.Sprintf("📌 Table: %s", fullTableName))
-						appendLog(sql)
-						appendLog(fmt.Sprintf("🔑 Primary Key: %s", primaryKeyJSON))
-					}
+		Loop:
+			for {
+				select {
+				case <-timeout:
+					// บันทึก state และเริ่มรอบใหม่
+					saveState(binlogPosStr, time.Now().Format("2006-01-02 15:04:05.000 -07"), binlogFile)
+					syncer.Close()
+					break Loop
 				default:
-					appendLog(fmt.Sprintf("⚠️ ไม่รู้จัก Event: %v", ev.Header.EventType))
+					ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+					ev, err := streamer.GetEvent(ctx)
+					cancel()
+					if err != nil && err != context.DeadlineExceeded {
+						updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ เกิดข้อผิดพลาดในการอ่าน Binlog: %v", err))
+						return
+					}
+					if ev == nil {
+						continue
+					}
+
+					switch e := ev.Event.(type) {
+					case *replication.TableMapEvent:
+						tableMap[e.TableID] = e
+
+					case *replication.RowsEvent:
+						table, ok := tableMap[e.TableID]
+						if !ok {
+							continue
+						}
+
+						dbName := string(table.Schema)
+						tableName := string(table.Table)
+						fullTableName := fmt.Sprintf("%s.%s", dbName, tableName)
+						timestamp := time.Unix(int64(ev.Header.Timestamp), 0).Format("2006-01-02 15:04:05")
+						binlogPosStr = fmt.Sprintf("%d", ev.Header.LogPos) // อัปเดต binlogPosStr ที่นี่
+
+						switch ev.Header.EventType {
+						case replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
+							for _, row := range e.Rows {
+								sql, primaryKeyJSON := buildInsertSQL(db, dbName, tableName, row)
+								updateTable(binlogPosStr, timestamp, fullTableName, "INSERT", primaryKeyJSON, sql)
+							}
+						case replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
+							for i := 0; i < len(e.Rows); i += 2 {
+								oldRow, newRow := e.Rows[i], e.Rows[i+1]
+								sql, primaryKeyJSON := buildUpdateSQL(db, dbName, tableName, oldRow, newRow)
+								updateTable(binlogPosStr, timestamp, fullTableName, "UPDATE", primaryKeyJSON, sql)
+							}
+						case replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
+							for _, row := range e.Rows {
+								sql, primaryKeyJSON := buildDeleteSQL(db, dbName, tableName, row)
+								updateTable(binlogPosStr, timestamp, fullTableName, "DELETE", primaryKeyJSON, sql)
+							}
+						}
+					}
 				}
 			}
 		}
 	}()
 
-	// Return UI
-	return container.NewVBox(
-		widget.NewLabel("MySQL Binlog Viewer"),
-		logText,
+	return container.NewMax(
+		container.NewVScroll(table),
 	)
 }
+
+// ฟังก์ชันแปลง string เป็น int (ใช้แทน strconv.Atoi)
+func atoi(s string) int {
+	var result int
+	fmt.Sscanf(s, "%d", &result)
+	return result
+}
+
+// ✅ ฟังก์ชันสร้าง JSON ของ Primary Key
+func buildPrimaryKeyJSON(primaryKeys []string, row []interface{}) string {
+	primaryKeyMap := make(map[string]interface{})
+	for i, key := range primaryKeys {
+		if i < len(row) {
+			primaryKeyMap[key] = row[i]
+		}
+	}
+	jsonData, _ := json.Marshal(primaryKeyMap)
+	return string(jsonData)
+}
+
+// ✅ ฟังก์ชันสร้างคำสั่ง INSERT
+func buildInsertSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
+	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
+	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, row)
+	return fmt.Sprintf("🟢 INSERT INTO `%s`.`%s` VALUES (%v);", dbName, tableName, row), primaryKeyJSON
+}
+
+// ✅ ฟังก์ชันสร้างคำสั่ง UPDATE โดยใช้ Primary Key
+func buildUpdateSQL(db *sql.DB, dbName, tableName string, oldRow, newRow []interface{}) (string, string) {
+	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
+	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, oldRow)
+
+	return fmt.Sprintf("🟠 UPDATE `%s`.`%s` SET ... WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
+}
+
+// ✅ ฟังก์ชันสร้างคำสั่ง DELETE โดยใช้ Primary Key
+func buildDeleteSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
+	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
+	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, row)
+
+	return fmt.Sprintf("🔴 DELETE FROM `%s`.`%s` WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
+}
+
 
 // ✅ ดึง Primary Key พร้อมค่าจากตาราง
 func getPrimaryKey(db *sql.DB, dbName, tableName string) ([]string, error) {
@@ -159,35 +343,3 @@ func getPrimaryKey(db *sql.DB, dbName, tableName string) ([]string, error) {
 	return primaryKeys, nil
 }
 
-// ✅ ฟังก์ชันสร้าง JSON ของ Primary Key
-func buildPrimaryKeyJSON(primaryKeys []string, row []interface{}) string {
-	primaryKeyMap := make(map[string]interface{})
-	for i, key := range primaryKeys {
-		if i < len(row) {
-			primaryKeyMap[key] = row[i]
-		}
-	}
-	jsonData, _ := json.Marshal(primaryKeyMap)
-	return string(jsonData)
-}
-
-// ✅ ฟังก์ชันสร้างคำสั่ง INSERT
-func buildInsertSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
-	return fmt.Sprintf("🟢 INSERT INTO `%s`.`%s` VALUES (%v);", dbName, tableName, row), "{}"
-}
-
-// ✅ ฟังก์ชันสร้างคำสั่ง UPDATE โดยใช้ Primary Key
-func buildUpdateSQL(db *sql.DB, dbName, tableName string, oldRow, newRow []interface{}) (string, string) {
-	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
-	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, oldRow)
-
-	return fmt.Sprintf("🟠 UPDATE `%s`.`%s` SET ... WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
-}
-
-// ✅ ฟังก์ชันสร้างคำสั่ง DELETE โดยใช้ Primary Key
-func buildDeleteSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
-	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
-	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, row)
-
-	return fmt.Sprintf("🔴 DELETE FROM `%s`.`%s` WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
-}
