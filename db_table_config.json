@@ -1,0 +1,18 @@
+[
+    {
+        "database": "jhcisdb05443",
+        "table": "person"
+    },
+    {
+        "database": "jhcisdb05443",
+        "table": "visit"
+    },
+    {
+        "database": "jhcisdb05443",
+        "table": "visitdiag"
+    },
+    {
+        "database": "jhcisdb05443",
+        "table": "visitdrug"
+    }
+]

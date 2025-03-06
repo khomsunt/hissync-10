@@ -18,22 +18,54 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	config "hissync-10/functions"
 )
 
+// โครงสร้างสำหรับ db_table_config.json
+type DBTableConfigEntry struct {
+	Database string `json:"database"`
+	Table    string `json:"table"`
+}
+
+type DBTableConfig []DBTableConfigEntry
+
+// โครงสร้างสำหรับ state.json
 type State struct {
 	LastBinlogPosition string `json:"last_binlog_position"`
 	LastLogDatetime    string `json:"last_log_datetime"`
 	LastLogFile        string `json:"last_log_file"`
 }
 
-func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
-	// โหลด config.json
+func MySQLLogView(configFile string, dbTableConfigFile string, w fyne.Window) fyne.CanvasObject {
+	// โหลด config.json (สำหรับการเชื่อมต่อ MySQL)
 	cfg, err := config.LoadConfig(configFile)
 	if err != nil {
 		log.Fatalf("❌ ไม่สามารถโหลด config.json: %v", err)
+	}
+
+	// โหลด db_table_config.json
+	var dbTblCfg DBTableConfig
+	dbTblConfigData, err := ioutil.ReadFile("db_table_config.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			// แสดง popup เตือนถ้าไม่พบไฟล์ (ใช้ w ที่รับมาจากพารามิเตอร์)
+			dialog.ShowInformation("Error", "ไม่พบไฟล์ db_table_config.json กรุณาสร้างไฟล์ก่อนใช้งาน", w)
+			return widget.NewLabel("ไม่สามารถเริ่มโปรแกรมได้ เนื่องจากไม่พบไฟล์ db_table_config.json")
+		}
+		log.Fatalf("❌ ไม่สามารถโหลด db_table_config.json: %v", err)
+	}
+	if err := json.Unmarshal(dbTblConfigData, &dbTblCfg); err != nil {
+		log.Fatalf("❌ ไม่สามารถแปลง db_table_config.json: %v", err)
+	}
+
+	// สร้าง map เพื่อตรวจสอบ table ที่ต้องการอย่างรวดเร็ว (key: "database.table")
+	allowedDBTables := make(map[string]bool)
+	for _, entry := range dbTblCfg {
+		fullName := fmt.Sprintf("%s.%s", entry.Database, entry.Table)
+		allowedDBTables[fullName] = true
 	}
 
 	// ตาราง Log
@@ -126,23 +158,16 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 
 	loadState := func() (string, string, error) {
 		file, err := ioutil.ReadFile(cfg.StateFile)
-
-		log.Println("cfg.StateFile=%s",cfg.StateFile)
-
-
 		if err != nil {
 			if os.IsNotExist(err) {
-				log.Println("IsNotExist")
-				return "0", "", nil // ถ้าไม่มีไฟล์ ให้คืนค่าเริ่มต้น
+				return "0", "", nil
 			}
-			log.Println("err != nil")
-			return "0", "", err // ถ้ามีข้อผิดพลาดอื่นๆ
+			return "0", "", err
 		}
 		var state State
 		if err := json.Unmarshal(file, &state); err != nil {
-			return "0", "", err // ถ้า unmarshal ไม่ได้
+			return "0", "", err
 		}
-		// ถ้า LastLogFile เป็นค่าว่างหรือข้อมูลไม่สมบูรณ์ ให้คืนค่าเริ่มต้น
 		if state.LastLogFile == "" {
 			return "0", "", nil
 		}
@@ -170,39 +195,29 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 		}
 
 		for {
-			// อ่าน state.json
 			lastPosStr, lastFile, err := loadState()
-			log.Println("lastPosStr=%s lastFile=%s",lastPosStr,lastFile)
-
+			if err != nil {
+				// updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถโหลด state.json: %v", err))
+				// return
+			}
 
 			var binlogPos uint32
 			var binlogFile string
-			binlogPosStr := lastPosStr // กำหนดค่าเริ่มต้นให้ binlogPosStr
+			binlogPosStr := lastPosStr
 
-			// ถ้าไม่มี lastFile หรือ lastPosStr เป็น "0" (กรณีเริ่มต้นหรือข้อมูลว่าง) ใช้ binlog ล่าสุด
 			if lastFile == "" || lastPosStr == "0" {
-				log.Println("lastFile=''")
 				var binlogIgnored1, binlogIgnored2, binlogIgnored3 string
 				err = db.QueryRow("SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &binlogIgnored1, &binlogIgnored2, &binlogIgnored3)
 				if err != nil {
 					updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถดึง Binlog ล่าสุด: %v", err))
 					return
 				}
-				binlogPosStr = fmt.Sprintf("%d", binlogPos) // อัปเดต binlogPosStr
-				lastFile = binlogFile                       // อัปเดต lastFile
+				binlogPosStr = fmt.Sprintf("%d", binlogPos)
+				lastFile = binlogFile
 			} else {
 				binlogFile = lastFile
-				binlogPos = uint32(atoi(lastPosStr)) // แปลง string เป็น uint32
+				binlogPos = uint32(atoi(lastPosStr))
 			}
-
-
-
-			if err != nil {
-				
-//				updateTable("0", time.Now().Format("2006-01-02 15:04:05"), "", "", "", fmt.Sprintf("❌ ไม่สามารถโหลด state.json: %v", err))
-//				return
-			}
-
 
 			syncer := replication.NewBinlogSyncer(syncerCfg)
 			streamer, err := syncer.StartSync(mysql.Position{Name: binlogFile, Pos: binlogPos})
@@ -212,13 +227,12 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 			}
 
 			tableMap := make(map[uint64]*replication.TableMapEvent)
-			timeout := time.After(10 * time.Second) // อ่านนานสุด 10 วินาที
+			timeout := time.After(10 * time.Second)
 
 		Loop:
 			for {
 				select {
 				case <-timeout:
-					// บันทึก state และเริ่มรอบใหม่
 					saveState(binlogPosStr, time.Now().Format("2006-01-02 15:04:05.000 -07"), binlogFile)
 					syncer.Close()
 					break Loop
@@ -247,8 +261,14 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 						dbName := string(table.Schema)
 						tableName := string(table.Table)
 						fullTableName := fmt.Sprintf("%s.%s", dbName, tableName)
+
+						// ตรวจสอบว่า database และ table อยู่ใน db_table_config.json หรือไม่
+						if !allowedDBTables[fullTableName] {
+							continue
+						}
+
 						timestamp := time.Unix(int64(ev.Header.Timestamp), 0).Format("2006-01-02 15:04:05")
-						binlogPosStr = fmt.Sprintf("%d", ev.Header.LogPos) // อัปเดต binlogPosStr ที่นี่
+						binlogPosStr = fmt.Sprintf("%d", ev.Header.LogPos)
 
 						switch ev.Header.EventType {
 						case replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
@@ -279,14 +299,14 @@ func MySQLLogView(configFile string, tableConfigFile string) fyne.CanvasObject {
 	)
 }
 
-// ฟังก์ชันแปลง string เป็น int (ใช้แทน strconv.Atoi)
+// ฟังก์ชันแปลง string เป็น int
 func atoi(s string) int {
 	var result int
 	fmt.Sscanf(s, "%d", &result)
 	return result
 }
 
-// ✅ ฟังก์ชันสร้าง JSON ของ Primary Key
+// ฟังก์ชันสร้าง JSON ของ Primary Key
 func buildPrimaryKeyJSON(primaryKeys []string, row []interface{}) string {
 	primaryKeyMap := make(map[string]interface{})
 	for i, key := range primaryKeys {
@@ -298,31 +318,28 @@ func buildPrimaryKeyJSON(primaryKeys []string, row []interface{}) string {
 	return string(jsonData)
 }
 
-// ✅ ฟังก์ชันสร้างคำสั่ง INSERT
+// ฟังก์ชันสร้างคำสั่ง INSERT
 func buildInsertSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
 	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
 	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, row)
 	return fmt.Sprintf("🟢 INSERT INTO `%s`.`%s` VALUES (%v);", dbName, tableName, row), primaryKeyJSON
 }
 
-// ✅ ฟังก์ชันสร้างคำสั่ง UPDATE โดยใช้ Primary Key
+// ฟังก์ชันสร้างคำสั่ง UPDATE โดยใช้ Primary Key
 func buildUpdateSQL(db *sql.DB, dbName, tableName string, oldRow, newRow []interface{}) (string, string) {
 	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
 	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, oldRow)
-
 	return fmt.Sprintf("🟠 UPDATE `%s`.`%s` SET ... WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
 }
 
-// ✅ ฟังก์ชันสร้างคำสั่ง DELETE โดยใช้ Primary Key
+// ฟังก์ชันสร้างคำสั่ง DELETE โดยใช้ Primary Key
 func buildDeleteSQL(db *sql.DB, dbName, tableName string, row []interface{}) (string, string) {
 	primaryKeys, _ := getPrimaryKey(db, dbName, tableName)
 	primaryKeyJSON := buildPrimaryKeyJSON(primaryKeys, row)
-
 	return fmt.Sprintf("🔴 DELETE FROM `%s`.`%s` WHERE %s;", dbName, tableName, primaryKeyJSON), primaryKeyJSON
 }
 
-
-// ✅ ดึง Primary Key พร้อมค่าจากตาราง
+// ดึง Primary Key พร้อมค่าจากตาราง
 func getPrimaryKey(db *sql.DB, dbName, tableName string) ([]string, error) {
 	query := fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s' AND COLUMN_KEY = 'PRI' ORDER BY ORDINAL_POSITION", dbName, tableName)
 	rows, err := db.Query(query)
@@ -342,4 +359,3 @@ func getPrimaryKey(db *sql.DB, dbName, tableName string) ([]string, error) {
 
 	return primaryKeys, nil
 }
-

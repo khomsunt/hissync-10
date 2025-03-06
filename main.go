@@ -101,12 +101,14 @@ func main() {
             }
             contentContainer.Refresh()
         }),
+
         widget.NewButton("MySQL Log File", func() {
             contentContainer.Objects = []fyne.CanvasObject{
-                views.MySQLLogView("config.json", "table_config.json"),
+                views.MySQLLogView("config.json", "db_table_config.json", myWindow),
             }
             contentContainer.Refresh()
         }),
+
     )
 
     sidebarContainer := container.NewVBox(
